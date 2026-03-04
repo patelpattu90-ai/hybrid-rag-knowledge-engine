@@ -1,5 +1,6 @@
 from ingestion import ingest_urls
 from chunker import IntelligentChunker
+from embeddings import EmbeddingIndexer
 
 if __name__ == "__main__":
 
@@ -24,3 +25,14 @@ if __name__ == "__main__":
 
     print(f"Total chunks created: {len(chunks)}")
     print(chunks[0])
+
+    indexer = EmbeddingIndexer()
+
+    indexer.build_index(chunks)
+
+    query = "How does dependency injection work in FastAPI?"
+
+    results = indexer.search(query)
+
+    for r in results:
+        print(r["section_title"])

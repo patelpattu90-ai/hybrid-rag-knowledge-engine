@@ -3,3 +3,5 @@ uvicorn
 beautifulsoup4
 requests
 pydantic
+tiktoken
+rank-bm25
