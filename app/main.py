@@ -3,6 +3,7 @@ from chunker import IntelligentChunker
 from embeddings import EmbeddingIndexer
 from bm25_retriever import BM25Retriever
 from hybrid_search import HybridSearch
+from reranker import CrossEncoderReranker
 
 if __name__ == "__main__":
 
@@ -36,10 +37,15 @@ if __name__ == "__main__":
 
     query = "How does dependency injection work in FastAPI?"
 
-    results, timings = hybrid.search(query)
+    candidate_chunks, timings = hybrid.search(query, top_k=20)
+
+    reranker = CrossEncoderReranker()
+
+    results = reranker.rerank(query, candidate_chunks, top_k=5)
 
     print("\nRetrieval Latency (ms):")
     print(timings)
-
+    
+    print("\nTop Results After Re-Ranking:\n")
     for r in results:
         print(r["section_title"])
