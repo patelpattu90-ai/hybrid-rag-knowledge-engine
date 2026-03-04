@@ -36,7 +36,10 @@ if __name__ == "__main__":
 
     query = "How does dependency injection work in FastAPI?"
 
-    results = hybrid.search(query)
+    results, timings = hybrid.search(query)
+
+    print("\nRetrieval Latency (ms):")
+    print(timings)
 
     for r in results:
         print(r["section_title"])
