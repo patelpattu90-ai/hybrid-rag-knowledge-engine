@@ -6,7 +6,9 @@ class BM25Retriever:
     def __init__(self, chunks):
 
         self.chunks = chunks
+
         corpus = [c["text"].split() for c in chunks]
+
         self.bm25 = BM25Okapi(corpus)
 
     def search(self, query):

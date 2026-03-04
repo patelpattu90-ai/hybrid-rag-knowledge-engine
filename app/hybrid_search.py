@@ -1,3 +1,4 @@
+import time
 class HybridSearch:
 
     def __init__(self, semantic_retriever, keyword_retriever):
@@ -17,14 +18,27 @@ class HybridSearch:
 
     def search(self, query, top_k=5):
 
-        semantic_results = self.semantic.search(query)
-        keyword_results = self.keyword.search(query)
+        timings = {}
 
+        # Semantic search timing
+        start = time.time()
+        semantic_results = self.semantic.search(query)
+        timings["semantic_ms"] = (time.time() - start) * 1000
+
+        # BM25 search timing
+        start = time.time()
+        keyword_results = self.keyword.search(query)
+        timings["bm25_ms"] = (time.time() - start) * 1000
+
+        # Extract scores
         semantic_scores = [r["semantic_score"] for r in semantic_results]
         bm25_scores = [r["bm25_score"] for r in keyword_results]
 
         semantic_scores = self.normalize(semantic_scores)
         bm25_scores = self.normalize(bm25_scores)
+
+    # Fusion timing
+        start = time.time()
 
         combined = []
 
@@ -41,4 +55,8 @@ class HybridSearch:
 
         combined.sort(reverse=True, key=lambda x: x[0])
 
-        return [c[1] for c in combined[:top_k]]
+        timings["fusion_ms"] = (time.time() - start) * 1000
+
+        results = [c[1] for c in combined[:top_k]]
+
+        return results, timings
