@@ -5,3 +5,5 @@ requests
 pydantic
 tiktoken
 rank-bm25
+groq
+python-dotenv
