@@ -121,7 +121,7 @@ rag_knowledge_engine/
 
 Clone the repository:
 
-git clone https://github.com/YOUR_USERNAME/hybrid-rag-knowledge-engine.git
+git clone https://github.com/patelpattu90-ai/hybrid-rag-knowledge-engine.git
 cd hybrid-rag-knowledge-engine
 
 Create a virtual environment:
