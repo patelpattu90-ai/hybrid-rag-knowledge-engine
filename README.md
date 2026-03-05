@@ -213,21 +213,15 @@ LLM	Groq
 UI	Gradio
 Visualization	Matplotlib
 Language	Python
-🎯 Key Learning Outcomes
 
-This project demonstrates:
+## 🎯 Why This Project
 
-Hybrid information retrieval
+Most RAG systems rely on pure semantic search — which fails on exact keyword lookups.
+This project solves that by combining semantic + keyword retrieval with cross-encoder
+reranking, giving significantly better retrieval quality than single-method approaches.
 
-RAG pipeline architecture
-
-Cross-encoder reranking
-
-Retrieval evaluation metrics
-
-LLM integration
-
-Interactive AI system UI
+Built to demonstrate production-ready RAG architecture with real evaluation metrics,
+not just a demo that "works on my machine".
 
 <h2 align="center">📸 Project Demo</h2>
 
