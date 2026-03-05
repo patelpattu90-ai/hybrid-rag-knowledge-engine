@@ -1,5 +1,14 @@
 ⚡ Hybrid RAG Knowledge Engine
 
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.10-3776AB?style=for-the-badge&logo=python&logoColor=white">
+  <img src="https://img.shields.io/badge/Groq-LLaMA3.3_70B-F54F36?style=for-the-badge&logo=groq&logoColor=white">
+  <img src="https://img.shields.io/badge/FAISS-Vector_Search-4285F4?style=for-the-badge">
+  <img src="https://img.shields.io/badge/Gradio-UI-FF7C00?style=for-the-badge&logo=gradio&logoColor=white">
+  <img src="https://img.shields.io/badge/License-MIT-22C55E?style=for-the-badge">
+  <img src="https://img.shields.io/badge/Status-Active-22C55E?style=for-the-badge">
+</p>
+
 A production-style Retrieval Augmented Generation (RAG) system that answers questions about FastAPI documentation using hybrid retrieval, reranking, and LLM generation.
 
 The system combines semantic search (FAISS) and keyword search (BM25), followed by cross-encoder reranking, to retrieve the most relevant documentation context before generating an answer with an LLM.
