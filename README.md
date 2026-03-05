@@ -19,21 +19,17 @@ The project also includes retrieval evaluation metrics and visualization to meas
 🔎 Hybrid Retrieval
 
 Semantic search using SentenceTransformers embeddings + FAISS
-
 Keyword search using BM25
-
 Hybrid score fusion for improved recall
 
 🧠 Reranking
 
 Cross-encoder reranker (ms-marco-MiniLM-L-6-v2)
-
 Improves relevance of top retrieved chunks
 
 🤖 LLM Generation
 
 Groq LLM used for context-aware answer generation
-
 Answers generated strictly from retrieved documentation
 
 📊 Retrieval Evaluation
@@ -41,72 +37,32 @@ Answers generated strictly from retrieved documentation
 Includes standard IR metrics:
 
 Precision@K
-
 MRR (Mean Reciprocal Rank)
-
 nDCG@K
-
 Metrics are visualized using Matplotlib charts.
 
 ⚡ Observability
 
 Retrieval latency breakdown:
-
 Semantic search time
-
 BM25 search time
-
 Hybrid fusion time
 
 🎨 Interactive UI
 
 Built using Gradio
-
 UI shows:
-
 Generated answer
-
 Retrieved document sections
-
 Retrieval latency
-
 Evaluation metrics chart
 
-🧠 System Architecture
-FastAPI Documentation
-        │
-        ▼
-Document Ingestion
-        │
-        ▼
-Markdown Section Parsing
-        │
-        ▼
-Document Chunking
-        │
-        ▼
-Embedding Generation (MiniLM)
-        │
-        ▼
-Vector Index (FAISS)
-        │
-        ▼
-BM25 Keyword Index
-        │
-        ▼
-Hybrid Retrieval (Semantic + Keyword)
-        │
-        ▼
-Cross Encoder Reranking
-        │
-        ▼
-Top Relevant Context
-        │
-        ▼
-Groq LLM Generation
-        │
-        ▼
-Final Answer
+## 🧠 System Architecture
+
+<p align ="center">
+  <img src="screenshots/final_architecture.png" width="750">
+</p>
+
 🧩 Project Structure
 rag_knowledge_engine/
 │
@@ -139,26 +95,23 @@ python -m venv venv
 source venv/bin/activate
 
 Install dependencies:
-
 pip install -r requirements.txt
 🔑 Environment Setup
 
 Add your Groq API key:
-
 export GROQ_API_KEY=your_api_key_here
 
 Or create a .env file:
-
 GROQ_API_KEY=your_api_key_here
+
 ▶️ Run the Application
 
 Start the RAG system:
-
 python -m app.ui
 
 Open the UI:
-
 http://127.0.0.1:7860
+
 💬 Example Queries
 
 Try asking:
