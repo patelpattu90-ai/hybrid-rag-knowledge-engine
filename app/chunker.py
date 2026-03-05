@@ -37,7 +37,7 @@ class IntelligentChunker:
             for idx, chunk in enumerate(text_chunks):
                 chunked_docs.append({
                     "chunk_id": str(uuid.uuid4()),
-                    "framework": doc["framework"],
+                    "framework": doc.get("framework", "unknown"),
                     "version": doc["version"],
                     "source_url": doc["source_url"],
                     "section_title": doc["section_title"],

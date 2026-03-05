@@ -1,18 +1,24 @@
+import os
+from dotenv import load_dotenv
 from groq import Groq
 
+load_dotenv()
 
+from groq import Groq
+
+def generate(self, query, context):        # rename param
+    context_text = context 
+    
 class GroqGenerator:
 
-    def __init__(self, api_key):
-
+    def __init__(self):
+        api_key = os.getenv("GROQ_API_KEY")
         self.client = Groq(api_key=api_key)
-
         self.model = "llama-3.3-70b-versatile"
-
-
+        
     def generate(self, query, contexts):
 
-        context_text = "\n\n".join([c["text"] for c in contexts])
+        context_text = "\n\n".join(contexts)
 
         prompt = f"""
 You are a technical documentation assistant.

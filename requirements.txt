@@ -7,3 +7,5 @@ tiktoken
 rank-bm25
 groq
 python-dotenv
+gradio
+requests
