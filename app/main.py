@@ -23,7 +23,7 @@ if __name__ == "__main__":
         "https://fastapi.tiangolo.com/tutorial/security/",
         "https://fastapi.tiangolo.com/tutorial/middleware/"
     ]
-
+    # Ingestion call
     docs = ingest_urls(
         urls=urls,
         framework="fastapi",
@@ -31,17 +31,23 @@ if __name__ == "__main__":
     )
 
     print(f"Sections parsed: {len(docs)}")
-   
+
+#    Chunking call
     chunker = IntelligentChunker(max_tokens=400, overlap=50)
     chunks = chunker.chunk_documents(docs)
 
     print(f"Total chunks created: {len(chunks)}")
+
+    # Keyword index
     bm25 = BM25Retriever(chunks)
     print(chunks[0])
-
+ 
+    # Call vector index
     indexer = EmbeddingIndexer()
 
     indexer.build_index(chunks)
+    
+    # Call Hybrid search 
     hybrid = HybridSearch(indexer, bm25)
 
     query = "How does dependency injection work in FastAPI?"
