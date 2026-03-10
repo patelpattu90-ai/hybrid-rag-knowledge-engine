@@ -2,22 +2,24 @@ import gradio as gr
 import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.rcParams['figure.facecolor'] = '#0f1117'
-matplotlib.rcParams['axes.facecolor'] = '#1a1d2e'
-matplotlib.rcParams['axes.edgecolor'] = '#2d3154'
-matplotlib.rcParams['text.color'] = '#e2e8f0'
-matplotlib.rcParams['axes.labelcolor'] = '#94a3b8'
-matplotlib.rcParams['xtick.color'] = '#94a3b8'
-matplotlib.rcParams['ytick.color'] = '#94a3b8'
+matplotlib.rcParams['axes.facecolor']   = '#1a1d2e'
+matplotlib.rcParams['axes.edgecolor']   = '#2d3154'
+matplotlib.rcParams['text.color']       = '#e2e8f0'
+matplotlib.rcParams['axes.labelcolor']  = '#94a3b8'
+matplotlib.rcParams['xtick.color']      = '#94a3b8'
+matplotlib.rcParams['ytick.color']      = '#94a3b8'
 
-from app.eval_dataset import eval_queries
-from app.evaluator import RetrievalEvaluator, build_eval_chart
-from app.ingestion import load_documents
-from app.chunker import IntelligentChunker
-from app.embeddings import EmbeddingIndexer
-from app.bm25_retriever import BM25Retriever
-from app.hybrid_search import HybridSearch
-from app.reranker import CrossEncoderReranker
-from app.generator import GroqGenerator
+from app.eval_dataset    import eval_queries
+from app.evaluator       import RetrievalEvaluator, build_eval_chart
+from app.ingestion       import load_documents
+from app.chunker         import IntelligentChunker
+from app.embeddings      import EmbeddingIndexer
+from app.bm25_retriever  import BM25Retriever
+from app.hybrid_search   import HybridSearch
+from app.reranker        import CrossEncoderReranker
+from app.generator       import GroqGenerator
+from app.cache           import query_cache
+from app.query_rewriter  import QueryRewriter          # ← NEW (Day 2)
 import re
 
 def clean_title(title):
@@ -29,48 +31,100 @@ def clean_title(title):
 # ---------------------------
 # Load and Prepare Documents
 # ---------------------------
-docs = load_documents()
-chunker = IntelligentChunker()
-chunks = chunker.chunk_documents(docs)
-texts = [c["text"] for c in chunks]
+docs              = load_documents()
+chunker           = IntelligentChunker()
+chunks            = chunker.chunk_documents(docs)
+texts             = [c["text"] for c in chunks]
 
 embedding_indexer = EmbeddingIndexer()
 embedding_indexer.build_index(chunks)
-bm25 = BM25Retriever(chunks)
-hybrid = HybridSearch(embedding_indexer, bm25)
-reranker = CrossEncoderReranker()
-generator = GroqGenerator()
+bm25              = BM25Retriever(chunks)
+hybrid            = HybridSearch(embedding_indexer, bm25)
+reranker          = CrossEncoderReranker()
+generator         = GroqGenerator()
+rewriter          = QueryRewriter()                    # ← NEW (Day 2)
 
 # ---------------------------
-# Pipeline
+# Pipeline  (streaming + cache + query rewriting)
 # ---------------------------
 def rag_pipeline(query):
-    results, latency = hybrid.search(query)
-    results = reranker.rerank(query, results)
-    contexts = [r["text"] for r in results[:5]]
-    answer = generator.generate(query, contexts)
-    sections = [clean_title(r["section_title"]) for r in results[:5]]
+    """
+    Gradio generator — yields (answer, sections, latency, chart, cache_md, rewrite_md)
+    on every streaming token so the answer box updates live.
+    """
 
-    # Find matching eval entry for this query
+    # ── 1. Cache check (keyed on ORIGINAL query) ─────────────────────────────
+    cached = query_cache.get(query, top_k=5)
+    if cached is not None:
+        yield (
+            cached["answer"],
+            cached["sections"],
+            cached["latency"],
+            cached["chart"],
+            _cache_stats_md(hit=True),
+            cached["rewrite_md"],
+        )
+        return
+
+    # ── 2. Query rewriting (NEW Day 2) ───────────────────────────────────────
+    rewrite         = rewriter.rewrite(query)
+    retrieval_query = rewrite.rewritten        # rewritten query goes to retrieval
+    rewrite_md      = rewrite.display()        # shown in UI panel
+
+    # ── 3. Retrieval (uses rewritten query) ──────────────────────────────────
+    results, latency = hybrid.search(retrieval_query)
+    results          = reranker.rerank(retrieval_query, results)
+    contexts         = [r["text"]                       for r in results[:5]]
+    sections         = [clean_title(r["section_title"]) for r in results[:5]]
+
+    # ── 4. Evaluation (matched on ORIGINAL query for eval dataset accuracy) ──
     evaluator = RetrievalEvaluator()
-    matched = next((e for e in eval_queries if e["query"].lower() == query.lower()), None)
+    matched   = next((e for e in eval_queries if e["query"].lower() == query.lower()), None)
+    relevant_sections = matched["relevant_sections"] if matched else (sections[:1] if sections else [])
 
-    if matched:
-        relevant_sections = matched["relevant_sections"]
-    else:
-        # Fallback: use the top retrieved section as pseudo ground truth
-        relevant_sections = [sections[0]] if sections else []
-
-    precision = evaluator.precision_at_k(results, relevant_sections)
-    mrr_score = evaluator.mrr(results, relevant_sections)
+    precision  = evaluator.precision_at_k(results, relevant_sections)
+    mrr_score  = evaluator.mrr(results, relevant_sections)
     ndcg_score = evaluator.ndcg(results, relevant_sections)
+    chart      = build_eval_chart(precision, mrr_score, ndcg_score)
 
-    plot = build_eval_chart(precision, mrr_score, ndcg_score)
+    # ── 5. Streaming generation ───────────────────────────────────────────────
+    answer = ""
+    for token in generator.stream(retrieval_query, contexts):
+        answer += token
+        yield answer, sections, latency, chart, _cache_stats_md(hit=False), rewrite_md
 
-    return answer, sections, latency, plot
+    # ── 6. Store completed result in cache ────────────────────────────────────
+    query_cache.set(query, {
+        "answer":     answer,
+        "sections":   sections,
+        "latency":    latency,
+        "chart":      chart,
+        "rewrite_md": rewrite_md,
+    }, top_k=5)
+
+    yield answer, sections, latency, chart, _cache_stats_md(hit=False), rewrite_md
+
 
 # ---------------------------
-# Custom CSS
+# Helper: cache stats markdown
+# ---------------------------
+def _cache_stats_md(hit: bool = False) -> str:
+    s     = query_cache.stats()
+    badge = "🟢 **CACHE HIT** — returned instantly" if hit else "🔵 Live query"
+    return (
+        f"{badge}\n\n"
+        f"**Entries:** {s['entries']} / {s['max_size']}  ·  "
+        f"**Hit rate:** {s['hit_rate_pct']}%  ·  "
+        f"**Hits:** {s['hits']}  ·  **Misses:** {s['misses']}"
+    )
+
+def _clear_cache():
+    query_cache.clear()
+    return _cache_stats_md()
+
+
+# ---------------------------
+# Custom CSS  (100% unchanged from Day 1)
 # ---------------------------
 css = """
 @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap');
@@ -88,7 +142,6 @@ body, .gradio-container {
     padding: 2rem !important;
 }
 
-/* Header */
 #header-md h1 {
     font-family: 'Space Mono', monospace !important;
     font-size: 2.2rem !important;
@@ -109,7 +162,6 @@ body, .gradio-container {
     margin-bottom: 2rem !important;
 }
 
-/* Panels */
 .panel {
     background: #0f1117 !important;
     border: 1px solid #1e2235 !important;
@@ -117,7 +169,6 @@ body, .gradio-container {
     padding: 1.5rem !important;
 }
 
-/* Labels */
 label span, .label-wrap span {
     font-family: 'Space Mono', monospace !important;
     font-size: 0.72rem !important;
@@ -127,7 +178,6 @@ label span, .label-wrap span {
     color: #475569 !important;
 }
 
-/* Textbox inputs */
 textarea, input[type="text"] {
     background: #0a0d16 !important;
     border: 1px solid #1e2235 !important;
@@ -145,7 +195,6 @@ textarea:focus, input[type="text"]:focus {
     box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15) !important;
 }
 
-/* JSON output */
 .json-holder {
     background: #0a0d16 !important;
     border: 1px solid #1e2235 !important;
@@ -155,7 +204,6 @@ textarea:focus, input[type="text"]:focus {
     color: #94a3b8 !important;
 }
 
-/* Buttons */
 #submit-btn button {
     background: linear-gradient(135deg, #6366f1, #8b5cf6) !important;
     border: none !important;
@@ -194,17 +242,34 @@ textarea:focus, input[type="text"]:focus {
     color: #94a3b8 !important;
 }
 
-/* Plot */
+#cache-stats {
+    background: #0a0d16 !important;
+    border: 1px solid #1e2235 !important;
+    border-radius: 12px !important;
+    padding: 0.75rem 1rem !important;
+    font-size: 0.82rem !important;
+    color: #64748b !important;
+}
+
+/* Query rewrite panel — purple left accent */
+#rewrite-info {
+    background: #0a0d16 !important;
+    border: 1px solid #1e2235 !important;
+    border-left: 3px solid #6366f1 !important;
+    border-radius: 12px !important;
+    padding: 0.75rem 1rem !important;
+    font-size: 0.85rem !important;
+    color: #94a3b8 !important;
+}
+
 .plot-container {
     background: #0f1117 !important;
     border: 1px solid #1e2235 !important;
     border-radius: 16px !important;
 }
 
-/* Divider spacing */
 .gap { gap: 1.2rem !important; }
 
-/* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: #0a0d16; }
 ::-webkit-scrollbar-thumb { background: #1e2235; border-radius: 3px; }
@@ -218,7 +283,10 @@ with gr.Blocks(title="Hybrid RAG Knowledge Engine", css=css, theme=gr.themes.Bas
 
     with gr.Column():
         gr.Markdown("# ⚡ Hybrid RAG Knowledge Engine", elem_id="header-md")
-        gr.Markdown("Semantic + BM25 retrieval · Cross-encoder reranking · LLM generation", elem_id="subheader-md")
+        gr.Markdown(
+            "Semantic + BM25 · Cross-encoder reranking · LLM generation · Streaming · Cache · Query Rewriting",
+            elem_id="subheader-md"
+        )
 
     with gr.Row(equal_height=True):
         query = gr.Textbox(
@@ -234,18 +302,50 @@ with gr.Blocks(title="Hybrid RAG Knowledge Engine", css=css, theme=gr.themes.Bas
             elem_classes=["panel"]
         )
 
+    # ── Query rewrite panel (NEW Day 2) ───────────────────────────────────
+    rewrite_info = gr.Markdown(
+        value="",
+        elem_id="rewrite-info",
+    )
+
     with gr.Row(equal_height=True):
         retrieved_sections = gr.JSON(label="Top Retrieved Sections", elem_classes=["panel"])
-        latency = gr.JSON(label="Retrieval Latency (ms)", elem_classes=["panel"])
+        latency            = gr.JSON(label="Retrieval Latency (ms)",  elem_classes=["panel"])
 
     chart = gr.Plot(label="Evaluation Metrics", elem_classes=["panel"])
 
-    with gr.Row():
-        clear = gr.Button("Clear", elem_id="clear-btn")
-        submit = gr.Button("Submit →", elem_id="submit-btn")
+    cache_stats = gr.Markdown(
+        value=_cache_stats_md(),
+        elem_id="cache-stats",
+    )
 
-    submit.click(rag_pipeline, inputs=query, outputs=[answer, retrieved_sections, latency, chart])
-    clear.click(lambda: ("", [], {}, None), outputs=[answer, retrieved_sections, latency, chart])
+    with gr.Row():
+        clear_cache_btn = gr.Button("Clear Cache",  elem_id="clear-btn")
+        clear_btn       = gr.Button("Clear Output", elem_id="clear-btn")
+        submit          = gr.Button("Submit →",     elem_id="submit-btn")
+
+    # ── Wire pipeline  (6 outputs now) ───────────────────────────────────
+    submit.click(
+        fn=rag_pipeline,
+        inputs=query,
+        outputs=[answer, retrieved_sections, latency, chart, cache_stats, rewrite_info],
+    )
+
+    query.submit(
+        fn=rag_pipeline,
+        inputs=query,
+        outputs=[answer, retrieved_sections, latency, chart, cache_stats, rewrite_info],
+    )
+
+    clear_btn.click(
+        fn=lambda: ("", [], {}, None, _cache_stats_md(), ""),
+        outputs=[answer, retrieved_sections, latency, chart, cache_stats, rewrite_info],
+    )
+
+    clear_cache_btn.click(
+        fn=_clear_cache,
+        outputs=[cache_stats],
+    )
 
 if __name__ == "__main__":
     demo.launch()
