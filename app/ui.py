@@ -20,7 +20,10 @@ from app.reranker        import CrossEncoderReranker
 from app.generator       import GroqGenerator
 from app.cache           import query_cache
 from app.query_rewriter  import QueryRewriter
-from app.memory          import ConversationMemory             # ← NEW (Day 3)
+from app.memory          import ConversationMemory
+from app.tool_router     import ToolRouter
+from app.tools           import dispatch_tool
+from app.guardrails      import Guardrails                     # ← NEW (Day 5)
 import re
 
 def clean_title(title):
@@ -44,22 +47,38 @@ hybrid            = HybridSearch(embedding_indexer, bm25)
 reranker          = CrossEncoderReranker()
 generator         = GroqGenerator()
 rewriter          = QueryRewriter()
+tool_router       = ToolRouter()
+guardrails        = Guardrails()                               # ← NEW (Day 5)
 
 # ---------------------------
-# Pipeline  (streaming + cache + query rewriting + memory)
+# Pipeline
 # ---------------------------
 def rag_pipeline(query, memory: ConversationMemory):
     """
-    Gradio generator — yields 7 values on every streaming token:
-      answer, sections, latency, chart, cache_md, rewrite_md, memory_md
-
-    memory is a ConversationMemory instance stored in gr.State() —
-    each browser tab gets its own independent session.
+    Gradio generator — yields 9 values on every streaming token:
+      answer, sections, latency, chart, cache_md, rewrite_md,
+      memory_md, tool_md, guard_md
     """
 
-    # ── 1. Cache check (keyed on ORIGINAL query, ignores history) ────────────
-    # Note: we intentionally don't cache history-dependent answers because
-    # "how do I install it?" means different things in different sessions.
+    # ── 0. GUARDRAILS — checked first, before anything else (NEW Day 5) ──────
+    guard  = guardrails.check(query)
+    guard_md = guard.badge()
+
+    if guard.blocked:
+        yield (
+            guard.user_message(),   # shown in answer box
+            [],                     # no sections
+            {},                     # no latency
+            None,                   # no chart
+            _cache_stats_md(),
+            "",                     # no rewrite
+            memory.display(),
+            "",                     # no tool
+            guard_md,               # red badge
+        )
+        return                      # ← pipeline stops here for blocked queries
+
+    # ── 1. Cache check ────────────────────────────────────────────────────────
     cached = query_cache.get(query, top_k=5)
     if cached is not None:
         yield (
@@ -69,7 +88,9 @@ def rag_pipeline(query, memory: ConversationMemory):
             cached["chart"],
             _cache_stats_md(hit=True),
             cached["rewrite_md"],
-            memory.display(),           # always show live memory state
+            memory.display(),
+            cached.get("tool_md", ""),
+            guard_md,
         )
         return
 
@@ -78,69 +99,93 @@ def rag_pipeline(query, memory: ConversationMemory):
     retrieval_query = rewrite.rewritten
     rewrite_md      = rewrite.display()
 
-    # ── 3. Retrieval ──────────────────────────────────────────────────────────
-    results, latency = hybrid.search(retrieval_query)
-    results          = reranker.rerank(retrieval_query, results)
-    contexts         = [r["text"]                       for r in results[:5]]
-    sections         = [clean_title(r["section_title"]) for r in results[:5]]
+    # ── 3. Tool routing ───────────────────────────────────────────────────────
+    route   = tool_router.route(query)
+    tool_md = route.badge()
 
-    # ── 4. Evaluation ─────────────────────────────────────────────────────────
-    evaluator = RetrievalEvaluator()
-    matched   = next((e for e in eval_queries if e["query"].lower() == query.lower()), None)
-    relevant_sections = matched["relevant_sections"] if matched else (sections[:1] if sections else [])
+    # ── 4. Retrieval — skipped for answer_direct ──────────────────────────────
+    contexts = []
+    sections = []
+    latency  = {}
+    chart    = None
 
-    precision  = evaluator.precision_at_k(results, relevant_sections)
-    mrr_score  = evaluator.mrr(results, relevant_sections)
-    ndcg_score = evaluator.ndcg(results, relevant_sections)
-    chart      = build_eval_chart(precision, mrr_score, ndcg_score)
+    if route.tool != "answer_direct":
+        top_k = 10 if route.tool == "summarise" else 5
 
-    # ── 5. Add user turn to memory BEFORE generation ─────────────────────────
+        results, latency = hybrid.search(retrieval_query)
+        results          = reranker.rerank(retrieval_query, results)
+        contexts         = [r["text"]                       for r in results[:top_k]]
+        sections         = [clean_title(r["section_title"]) for r in results[:top_k]]
+
+        evaluator = RetrievalEvaluator()
+        matched   = next((e for e in eval_queries if e["query"].lower() == query.lower()), None)
+        relevant_sections = matched["relevant_sections"] if matched else (sections[:1] if sections else [])
+
+        precision  = evaluator.precision_at_k(results, relevant_sections)
+        mrr_score  = evaluator.mrr(results, relevant_sections)
+        ndcg_score = evaluator.ndcg(results, relevant_sections)
+        chart      = build_eval_chart(precision, mrr_score, ndcg_score)
+
+    # ── 5. Add user turn to memory ────────────────────────────────────────────
     memory.add_user(query)
+    history = memory.get_history()
 
-    # ── 6. Streaming generation WITH history (NEW Day 3) ─────────────────────
+    # ── 6. Dispatch to correct tool + stream ──────────────────────────────────
+    tool_result = dispatch_tool(
+        tool_name=route.tool,
+        query=query,
+        retrieval_query=retrieval_query,
+        contexts=contexts,
+        sections=sections,
+        latency=latency,
+        history=history,
+        generator=generator,
+    )
+
     answer = ""
-    history = memory.get_history()          # includes the user turn just added
-
-    for token in generator.stream_with_history(retrieval_query, contexts, history):
+    for token in tool_result.token_gen:
         answer += token
         yield (
             answer,
-            sections,
-            latency,
+            tool_result.sections,
+            tool_result.latency,
             chart,
             _cache_stats_md(hit=False),
             rewrite_md,
             memory.display(),
+            tool_md,
+            guard_md,
         )
 
-    # ── 7. Add completed assistant answer to memory ───────────────────────────
+    # ── 7. Add assistant answer to memory ─────────────────────────────────────
     memory.add_assistant(answer)
 
-    # ── 8. Cache the result (only for non-history-dependent queries) ──────────
-    # Simple heuristic: cache only if memory was empty before this turn,
-    # meaning no prior context was used.
-    if memory.turn_count() <= 2:            # just user + assistant = fresh session
+    # ── 8. Cache ──────────────────────────────────────────────────────────────
+    if memory.turn_count() <= 2 and route.tool != "answer_direct":
         query_cache.set(query, {
             "answer":     answer,
-            "sections":   sections,
-            "latency":    latency,
+            "sections":   tool_result.sections,
+            "latency":    tool_result.latency,
             "chart":      chart,
             "rewrite_md": rewrite_md,
+            "tool_md":    tool_md,
         }, top_k=5)
 
     yield (
         answer,
-        sections,
-        latency,
+        tool_result.sections,
+        tool_result.latency,
         chart,
         _cache_stats_md(hit=False),
         rewrite_md,
         memory.display(),
+        tool_md,
+        guard_md,
     )
 
 
 # ---------------------------
-# Helper: cache stats markdown
+# Helpers
 # ---------------------------
 def _cache_stats_md(hit: bool = False) -> str:
     s     = query_cache.stats()
@@ -295,11 +340,31 @@ textarea:focus, input[type="text"]:focus {
     color: #94a3b8 !important;
 }
 
-/* Memory panel — teal left accent to distinguish from rewrite */
 #memory-info {
     background: #0a0d16 !important;
     border: 1px solid #1e2235 !important;
     border-left: 3px solid #0f766e !important;
+    border-radius: 12px !important;
+    padding: 0.75rem 1rem !important;
+    font-size: 0.85rem !important;
+    color: #94a3b8 !important;
+}
+
+#tool-info {
+    background: #0a0d16 !important;
+    border: 1px solid #1e2235 !important;
+    border-left: 3px solid #c05621 !important;
+    border-radius: 12px !important;
+    padding: 0.75rem 1rem !important;
+    font-size: 0.85rem !important;
+    color: #94a3b8 !important;
+}
+
+/* Guardrail panel — red left accent for blocks, green for pass */
+#guard-info {
+    background: #0a0d16 !important;
+    border: 1px solid #1e2235 !important;
+    border-left: 3px solid #dc2626 !important;
     border-radius: 12px !important;
     padding: 0.75rem 1rem !important;
     font-size: 0.85rem !important;
@@ -325,15 +390,13 @@ textarea:focus, input[type="text"]:focus {
 # ---------------------------
 with gr.Blocks(title="Hybrid RAG Knowledge Engine", css=css, theme=gr.themes.Base()) as demo:
 
-    # ── Session memory — one instance per browser tab (gr.State) ─────────────
-    # gr.State holds a Python object that persists across multiple .click()
-    # calls within the same session but is independent across tabs/users.
-    session_memory = gr.State(lambda: ConversationMemory(max_turns=6))  # ← NEW Day 3
+    session_memory = gr.State(lambda: ConversationMemory(max_turns=6))
 
     with gr.Column():
         gr.Markdown("# ⚡ Hybrid RAG Knowledge Engine", elem_id="header-md")
         gr.Markdown(
-            "Semantic + BM25 · Cross-encoder reranking · LLM generation · Streaming · Cache · Query Rewriting · Memory",
+            "Semantic + BM25 · Cross-encoder reranking · LLM generation · "
+            "Streaming · Cache · Query Rewriting · Memory · Tool Routing · Guardrails",
             elem_id="subheader-md"
         )
 
@@ -351,10 +414,12 @@ with gr.Blocks(title="Hybrid RAG Knowledge Engine", css=css, theme=gr.themes.Bas
             elem_classes=["panel"]
         )
 
-    # ── Info panels row ───────────────────────────────────────────────────────
+    # ── Four info panels: guard · rewrite · memory · tool ─────────────────────
     with gr.Row():
+        guard_info   = gr.Markdown(value="🛡️ **Guardrails:** Ready", elem_id="guard-info")
         rewrite_info = gr.Markdown(value="", elem_id="rewrite-info")
-        memory_info  = gr.Markdown(value="💬 **Memory:** No history yet", elem_id="memory-info")  # ← NEW Day 3
+        memory_info  = gr.Markdown(value="💬 **Memory:** No history yet", elem_id="memory-info")
+        tool_info    = gr.Markdown(value="", elem_id="tool-info")
 
     with gr.Row(equal_height=True):
         retrieved_sections = gr.JSON(label="Top Retrieved Sections", elem_classes=["panel"])
@@ -365,25 +430,20 @@ with gr.Blocks(title="Hybrid RAG Knowledge Engine", css=css, theme=gr.themes.Bas
     cache_stats = gr.Markdown(value=_cache_stats_md(), elem_id="cache-stats")
 
     with gr.Row():
-        clear_history_btn = gr.Button("Clear History", elem_id="clear-btn")  # ← NEW Day 3
+        clear_history_btn = gr.Button("Clear History", elem_id="clear-btn")
         clear_cache_btn   = gr.Button("Clear Cache",   elem_id="clear-btn")
         clear_btn         = gr.Button("Clear Output",  elem_id="clear-btn")
         submit            = gr.Button("Submit →",      elem_id="submit-btn")
 
-    # ── Wire pipeline  (memory is both input AND output so State updates) ─────
-    submit.click(
-        fn=rag_pipeline,
-        inputs=[query, session_memory],
-        outputs=[answer, retrieved_sections, latency, chart, cache_stats, rewrite_info, memory_info],
-    )
+    # ── Wire pipeline (9 outputs now) ─────────────────────────────────────────
+    _outputs = [
+        answer, retrieved_sections, latency, chart,
+        cache_stats, rewrite_info, memory_info, tool_info, guard_info,
+    ]
 
-    query.submit(
-        fn=rag_pipeline,
-        inputs=[query, session_memory],
-        outputs=[answer, retrieved_sections, latency, chart, cache_stats, rewrite_info, memory_info],
-    )
+    submit.click(fn=rag_pipeline, inputs=[query, session_memory], outputs=_outputs)
+    query.submit(fn=rag_pipeline, inputs=[query, session_memory], outputs=_outputs)
 
-    # ── Clear history — resets memory State for this session ──────────────────
     def clear_history(memory: ConversationMemory):
         memory.clear()
         return memory, "💬 **Memory:** Cleared"
@@ -395,14 +455,13 @@ with gr.Blocks(title="Hybrid RAG Knowledge Engine", css=css, theme=gr.themes.Bas
     )
 
     clear_btn.click(
-        fn=lambda: ("", [], {}, None, _cache_stats_md(), "", "💬 **Memory:** No history yet"),
-        outputs=[answer, retrieved_sections, latency, chart, cache_stats, rewrite_info, memory_info],
+        fn=lambda: ("", [], {}, None, _cache_stats_md(), "",
+                    "💬 **Memory:** No history yet", "",
+                    "🛡️ **Guardrails:** Ready"),
+        outputs=_outputs,
     )
 
-    clear_cache_btn.click(
-        fn=_clear_cache,
-        outputs=[cache_stats],
-    )
+    clear_cache_btn.click(fn=_clear_cache, outputs=[cache_stats])
 
 if __name__ == "__main__":
     demo.launch()
