@@ -7,6 +7,7 @@ import requests
 def load_documents():
 
     urls = [
+        # ── existing 8 ──────────────────────────────────────────────────────
         "https://raw.githubusercontent.com/tiangolo/fastapi/master/docs/en/docs/index.md",
         "https://raw.githubusercontent.com/tiangolo/fastapi/master/docs/en/docs/tutorial/first-steps.md",
         "https://raw.githubusercontent.com/tiangolo/fastapi/master/docs/en/docs/tutorial/dependencies/index.md",
@@ -15,6 +16,14 @@ def load_documents():
         "https://raw.githubusercontent.com/tiangolo/fastapi/master/docs/en/docs/tutorial/body.md",
         "https://raw.githubusercontent.com/tiangolo/fastapi/master/docs/en/docs/tutorial/routing.md",
         "https://raw.githubusercontent.com/tiangolo/fastapi/master/docs/en/docs/tutorial/middleware.md",
+        # ── NEW 7 ────────────────────────────────────────────────────────────
+        "https://raw.githubusercontent.com/tiangolo/fastapi/master/docs/en/docs/tutorial/handling-errors.md",
+        "https://raw.githubusercontent.com/tiangolo/fastapi/master/docs/en/docs/tutorial/response-model.md",
+        "https://raw.githubusercontent.com/tiangolo/fastapi/master/docs/en/docs/tutorial/security/index.md",
+        "https://raw.githubusercontent.com/tiangolo/fastapi/master/docs/en/docs/tutorial/background-tasks.md",
+        "https://raw.githubusercontent.com/tiangolo/fastapi/master/docs/en/docs/tutorial/bigger-applications.md",
+        "https://raw.githubusercontent.com/tiangolo/fastapi/master/docs/en/docs/tutorial/testing.md",
+        "https://raw.githubusercontent.com/tiangolo/fastapi/master/docs/en/docs/tutorial/sql-databases.md",
     ]
 
     docs = []

@@ -21,11 +21,11 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # ── Valid tool names ──────────────────────────────────────────────────────────
-TOOL_SEARCH   = "search_docs"
+TOOL_SEARCH    = "search_docs"
 TOOL_SUMMARISE = "summarise"
-TOOL_DIRECT   = "answer_direct"
-VALID_TOOLS   = {TOOL_SEARCH, TOOL_SUMMARISE, TOOL_DIRECT}
-FALLBACK_TOOL = TOOL_SEARCH
+TOOL_DIRECT    = "answer_direct"
+VALID_TOOLS    = {TOOL_SEARCH, TOOL_SUMMARISE, TOOL_DIRECT}
+FALLBACK_TOOL  = TOOL_SEARCH
 
 
 # ── Result container ──────────────────────────────────────────────────────────
@@ -105,13 +105,11 @@ Output only one of: search_docs | summarise | answer_direct"""
                     {"role": "system", "content": self._SYSTEM},
                     {"role": "user",   "content": query},
                 ],
-                temperature=0.0,   # deterministic classification
-                max_tokens=10,     # we only need one word back
+                temperature=0.0,
+                max_tokens=10,
             )
 
-            raw = response.choices[0].message.content.strip().lower()
-
-            # Strip any punctuation the LLM might add
+            raw  = response.choices[0].message.content.strip().lower()
             tool = raw.split()[0] if raw else ""
             tool = tool.strip(".,!?\"'")
 
@@ -120,7 +118,7 @@ Output only one of: search_docs | summarise | answer_direct"""
                 return RouteResult(
                     tool=FALLBACK_TOOL,
                     confidence="low",
-                    reason=f"Unexpected classifier output → fallback"
+                    reason="Unexpected classifier output → fallback"
                 )
 
             reasons = {

@@ -23,7 +23,8 @@ from app.query_rewriter  import QueryRewriter
 from app.memory          import ConversationMemory
 from app.tool_router     import ToolRouter
 from app.tools           import dispatch_tool
-from app.guardrails      import Guardrails                     # ← NEW (Day 5)
+from app.guardrails      import Guardrails
+from app.security        import input_sanitiser, pii_scrubber  # ← NEW (Day 6)
 import re
 
 def clean_title(title):
@@ -48,7 +49,8 @@ reranker          = CrossEncoderReranker()
 generator         = GroqGenerator()
 rewriter          = QueryRewriter()
 tool_router       = ToolRouter()
-guardrails        = Guardrails()                               # ← NEW (Day 5)
+guardrails        = Guardrails()
+# input_sanitiser + pii_scrubber are module-level singletons
 
 # ---------------------------
 # Pipeline
@@ -56,30 +58,29 @@ guardrails        = Guardrails()                               # ← NEW (Day 5)
 def rag_pipeline(query, memory: ConversationMemory):
     """
     Gradio generator — yields 9 values on every streaming token:
-      answer, sections, latency, chart, cache_md, rewrite_md,
-      memory_md, tool_md, guard_md
+      answer, sections, latency, chart, cache_md,
+      rewrite_md, memory_md, tool_md, guard_md
     """
 
-    # ── 0. GUARDRAILS — checked first, before anything else (NEW Day 5) ──────
-    guard  = guardrails.check(query)
-    guard_md = guard.badge()
+    # ── 0a. INPUT SANITISATION (NEW Day 6) ────────────────────────────────────
+    sanitise_result = input_sanitiser.sanitise(query)
+    clean_query     = sanitise_result.sanitised
+
+    # ── 0b. GUARDRAILS (Day 5) ────────────────────────────────────────────────
+    guard    = guardrails.check(clean_query)
+    guard_md = _guard_badge(guard, sanitise_result)
 
     if guard.blocked:
         yield (
-            guard.user_message(),   # shown in answer box
-            [],                     # no sections
-            {},                     # no latency
-            None,                   # no chart
+            guard.user_message(),
+            [], {}, None,
             _cache_stats_md(),
-            "",                     # no rewrite
-            memory.display(),
-            "",                     # no tool
-            guard_md,               # red badge
+            "", memory.display(), "", guard_md,
         )
-        return                      # ← pipeline stops here for blocked queries
+        return
 
     # ── 1. Cache check ────────────────────────────────────────────────────────
-    cached = query_cache.get(query, top_k=5)
+    cached = query_cache.get(clean_query, top_k=5)
     if cached is not None:
         yield (
             cached["answer"],
@@ -95,15 +96,15 @@ def rag_pipeline(query, memory: ConversationMemory):
         return
 
     # ── 2. Query rewriting ────────────────────────────────────────────────────
-    rewrite         = rewriter.rewrite(query)
+    rewrite         = rewriter.rewrite(clean_query)
     retrieval_query = rewrite.rewritten
     rewrite_md      = rewrite.display()
 
     # ── 3. Tool routing ───────────────────────────────────────────────────────
-    route   = tool_router.route(query)
+    route   = tool_router.route(clean_query)
     tool_md = route.badge()
 
-    # ── 4. Retrieval — skipped for answer_direct ──────────────────────────────
+    # ── 4. Retrieval ──────────────────────────────────────────────────────────
     contexts = []
     sections = []
     latency  = {}
@@ -114,11 +115,14 @@ def rag_pipeline(query, memory: ConversationMemory):
 
         results, latency = hybrid.search(retrieval_query)
         results          = reranker.rerank(retrieval_query, results)
-        contexts         = [r["text"]                       for r in results[:top_k]]
+        raw_contexts     = [r["text"]                       for r in results[:top_k]]
         sections         = [clean_title(r["section_title"]) for r in results[:top_k]]
 
+        # ── PII SCRUB: chunk text before sending to LLM (NEW Day 6) ──────────
+        contexts = pii_scrubber.scrub_contexts(raw_contexts)
+
         evaluator = RetrievalEvaluator()
-        matched   = next((e for e in eval_queries if e["query"].lower() == query.lower()), None)
+        matched   = next((e for e in eval_queries if e["query"].lower() == clean_query.lower()), None)
         relevant_sections = matched["relevant_sections"] if matched else (sections[:1] if sections else [])
 
         precision  = evaluator.precision_at_k(results, relevant_sections)
@@ -127,13 +131,13 @@ def rag_pipeline(query, memory: ConversationMemory):
         chart      = build_eval_chart(precision, mrr_score, ndcg_score)
 
     # ── 5. Add user turn to memory ────────────────────────────────────────────
-    memory.add_user(query)
+    memory.add_user(clean_query)
     history = memory.get_history()
 
     # ── 6. Dispatch to correct tool + stream ──────────────────────────────────
     tool_result = dispatch_tool(
         tool_name=route.tool,
-        query=query,
+        query=clean_query,
         retrieval_query=retrieval_query,
         contexts=contexts,
         sections=sections,
@@ -157,12 +161,15 @@ def rag_pipeline(query, memory: ConversationMemory):
             guard_md,
         )
 
-    # ── 7. Add assistant answer to memory ─────────────────────────────────────
+    # ── 7. PII SCRUB: generated answer before showing to user (NEW Day 6) ────
+    answer = pii_scrubber.scrub_answer(answer)
+
+    # ── 8. Add scrubbed answer to memory ─────────────────────────────────────
     memory.add_assistant(answer)
 
-    # ── 8. Cache ──────────────────────────────────────────────────────────────
+    # ── 9. Cache ──────────────────────────────────────────────────────────────
     if memory.turn_count() <= 2 and route.tool != "answer_direct":
-        query_cache.set(query, {
+        query_cache.set(clean_query, {
             "answer":     answer,
             "sections":   tool_result.sections,
             "latency":    tool_result.latency,
@@ -187,6 +194,22 @@ def rag_pipeline(query, memory: ConversationMemory):
 # ---------------------------
 # Helpers
 # ---------------------------
+def _guard_badge(guard, sanitise_result) -> str:
+    parts = []
+    if sanitise_result.was_modified:
+        parts.append(f"🔐 **Security:** {len(sanitise_result.changes)} pattern(s) stripped")
+    else:
+        parts.append("🔐 **Security:** Input clean")
+
+    if guard.blocked:
+        icons = {"jailbreak": "🚨", "harmful": "🚨", "off_topic": "⚠️"}
+        parts.append(f"{icons.get(guard.layer, '⚠️')} **Guardrails:** Blocked — {guard.layer}")
+    else:
+        parts.append("🛡️ **Guardrails:** Passed")
+
+    return "  ·  ".join(parts)
+
+
 def _cache_stats_md(hit: bool = False) -> str:
     s     = query_cache.stats()
     badge = "🟢 **CACHE HIT** — returned instantly" if hit else "🔵 Live query"
@@ -360,7 +383,6 @@ textarea:focus, input[type="text"]:focus {
     color: #94a3b8 !important;
 }
 
-/* Guardrail panel — red left accent for blocks, green for pass */
 #guard-info {
     background: #0a0d16 !important;
     border: 1px solid #1e2235 !important;
@@ -396,7 +418,8 @@ with gr.Blocks(title="Hybrid RAG Knowledge Engine", css=css, theme=gr.themes.Bas
         gr.Markdown("# ⚡ Hybrid RAG Knowledge Engine", elem_id="header-md")
         gr.Markdown(
             "Semantic + BM25 · Cross-encoder reranking · LLM generation · "
-            "Streaming · Cache · Query Rewriting · Memory · Tool Routing · Guardrails",
+            "Streaming · Cache · Query Rewriting · Memory · Tool Routing · "
+            "Guardrails · Prompt Injection Defense · PII Scrubbing",
             elem_id="subheader-md"
         )
 
@@ -414,9 +437,12 @@ with gr.Blocks(title="Hybrid RAG Knowledge Engine", css=css, theme=gr.themes.Bas
             elem_classes=["panel"]
         )
 
-    # ── Four info panels: guard · rewrite · memory · tool ─────────────────────
+    # ── Info panels: security+guard · rewrite · memory · tool ─────────────────
     with gr.Row():
-        guard_info   = gr.Markdown(value="🛡️ **Guardrails:** Ready", elem_id="guard-info")
+        guard_info   = gr.Markdown(
+            value="🔐 **Security:** Input clean  ·  🛡️ **Guardrails:** Ready",
+            elem_id="guard-info"
+        )
         rewrite_info = gr.Markdown(value="", elem_id="rewrite-info")
         memory_info  = gr.Markdown(value="💬 **Memory:** No history yet", elem_id="memory-info")
         tool_info    = gr.Markdown(value="", elem_id="tool-info")
@@ -435,7 +461,6 @@ with gr.Blocks(title="Hybrid RAG Knowledge Engine", css=css, theme=gr.themes.Bas
         clear_btn         = gr.Button("Clear Output",  elem_id="clear-btn")
         submit            = gr.Button("Submit →",      elem_id="submit-btn")
 
-    # ── Wire pipeline (9 outputs now) ─────────────────────────────────────────
     _outputs = [
         answer, retrieved_sections, latency, chart,
         cache_stats, rewrite_info, memory_info, tool_info, guard_info,
@@ -457,7 +482,7 @@ with gr.Blocks(title="Hybrid RAG Knowledge Engine", css=css, theme=gr.themes.Bas
     clear_btn.click(
         fn=lambda: ("", [], {}, None, _cache_stats_md(), "",
                     "💬 **Memory:** No history yet", "",
-                    "🛡️ **Guardrails:** Ready"),
+                    "🔐 **Security:** Input clean  ·  🛡️ **Guardrails:** Ready"),
         outputs=_outputs,
     )
 
