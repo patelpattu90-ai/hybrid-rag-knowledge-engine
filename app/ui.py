@@ -24,7 +24,8 @@ from app.memory          import ConversationMemory
 from app.tool_router     import ToolRouter
 from app.tools           import dispatch_tool
 from app.guardrails      import Guardrails
-from app.security        import input_sanitiser, pii_scrubber  # ← NEW (Day 6)
+from app.security        import input_sanitiser, pii_scrubber
+from app.ragas_eval      import RAGASEvaluator, build_ragas_chart  # ← NEW (Day 7)
 import re
 
 def clean_title(title):
@@ -50,23 +51,24 @@ generator         = GroqGenerator()
 rewriter          = QueryRewriter()
 tool_router       = ToolRouter()
 guardrails        = Guardrails()
-# input_sanitiser + pii_scrubber are module-level singletons
+ragas_evaluator   = RAGASEvaluator()                               # ← NEW (Day 7)
 
 # ---------------------------
 # Pipeline
 # ---------------------------
 def rag_pipeline(query, memory: ConversationMemory):
     """
-    Gradio generator — yields 9 values on every streaming token:
-      answer, sections, latency, chart, cache_md,
-      rewrite_md, memory_md, tool_md, guard_md
+    Gradio generator — yields 11 values on every streaming token:
+      answer, sections, latency, retrieval_chart, cache_md,
+      rewrite_md, memory_md, tool_md, guard_md,
+      ragas_chart, ragas_md
     """
 
-    # ── 0a. INPUT SANITISATION (NEW Day 6) ────────────────────────────────────
+    # ── 0a. INPUT SANITISATION ────────────────────────────────────────────────
     sanitise_result = input_sanitiser.sanitise(query)
     clean_query     = sanitise_result.sanitised
 
-    # ── 0b. GUARDRAILS (Day 5) ────────────────────────────────────────────────
+    # ── 0b. GUARDRAILS ────────────────────────────────────────────────────────
     guard    = guardrails.check(clean_query)
     guard_md = _guard_badge(guard, sanitise_result)
 
@@ -76,6 +78,7 @@ def rag_pipeline(query, memory: ConversationMemory):
             [], {}, None,
             _cache_stats_md(),
             "", memory.display(), "", guard_md,
+            None, "",
         )
         return
 
@@ -92,6 +95,8 @@ def rag_pipeline(query, memory: ConversationMemory):
             memory.display(),
             cached.get("tool_md", ""),
             guard_md,
+            cached.get("ragas_chart"),
+            cached.get("ragas_md", ""),
         )
         return
 
@@ -105,10 +110,10 @@ def rag_pipeline(query, memory: ConversationMemory):
     tool_md = route.badge()
 
     # ── 4. Retrieval ──────────────────────────────────────────────────────────
-    contexts = []
-    sections = []
-    latency  = {}
-    chart    = None
+    contexts        = []
+    sections        = []
+    latency         = {}
+    retrieval_chart = None
 
     if route.tool != "answer_direct":
         top_k = 10 if route.tool == "summarise" else 5
@@ -117,9 +122,7 @@ def rag_pipeline(query, memory: ConversationMemory):
         results          = reranker.rerank(retrieval_query, results)
         raw_contexts     = [r["text"]                       for r in results[:top_k]]
         sections         = [clean_title(r["section_title"]) for r in results[:top_k]]
-
-        # ── PII SCRUB: chunk text before sending to LLM (NEW Day 6) ──────────
-        contexts = pii_scrubber.scrub_contexts(raw_contexts)
+        contexts         = pii_scrubber.scrub_contexts(raw_contexts)
 
         evaluator = RetrievalEvaluator()
         matched   = next((e for e in eval_queries if e["query"].lower() == clean_query.lower()), None)
@@ -128,13 +131,13 @@ def rag_pipeline(query, memory: ConversationMemory):
         precision  = evaluator.precision_at_k(results, relevant_sections)
         mrr_score  = evaluator.mrr(results, relevant_sections)
         ndcg_score = evaluator.ndcg(results, relevant_sections)
-        chart      = build_eval_chart(precision, mrr_score, ndcg_score)
+        retrieval_chart = build_eval_chart(precision, mrr_score, ndcg_score)
 
     # ── 5. Add user turn to memory ────────────────────────────────────────────
     memory.add_user(clean_query)
     history = memory.get_history()
 
-    # ── 6. Dispatch to correct tool + stream ──────────────────────────────────
+    # ── 6. Dispatch + stream ──────────────────────────────────────────────────
     tool_result = dispatch_tool(
         tool_name=route.tool,
         query=clean_query,
@@ -153,41 +156,56 @@ def rag_pipeline(query, memory: ConversationMemory):
             answer,
             tool_result.sections,
             tool_result.latency,
-            chart,
+            retrieval_chart,
             _cache_stats_md(hit=False),
             rewrite_md,
             memory.display(),
             tool_md,
             guard_md,
+            None,
+            "⏳ **RAGAS:** Evaluating after generation...",
         )
 
-    # ── 7. PII SCRUB: generated answer before showing to user (NEW Day 6) ────
+    # ── 7. PII scrub answer ───────────────────────────────────────────────────
     answer = pii_scrubber.scrub_answer(answer)
 
-    # ── 8. Add scrubbed answer to memory ─────────────────────────────────────
+    # ── 8. RAGAS evaluation (NEW Day 7) ───────────────────────────────────────
+    ragas_result = ragas_evaluator.evaluate(
+        query=clean_query,
+        answer=answer,
+        contexts=contexts,
+    )
+    ragas_chart = build_ragas_chart(ragas_result)
+    ragas_md    = ragas_result.summary_md()
+
+    # ── 9. Add to memory ──────────────────────────────────────────────────────
     memory.add_assistant(answer)
 
-    # ── 9. Cache ──────────────────────────────────────────────────────────────
+    # ── 10. Cache ─────────────────────────────────────────────────────────────
     if memory.turn_count() <= 2 and route.tool != "answer_direct":
         query_cache.set(clean_query, {
-            "answer":     answer,
-            "sections":   tool_result.sections,
-            "latency":    tool_result.latency,
-            "chart":      chart,
-            "rewrite_md": rewrite_md,
-            "tool_md":    tool_md,
+            "answer":      answer,
+            "sections":    tool_result.sections,
+            "latency":     tool_result.latency,
+            "chart":       retrieval_chart,
+            "rewrite_md":  rewrite_md,
+            "tool_md":     tool_md,
+            "ragas_chart": ragas_chart,
+            "ragas_md":    ragas_md,
         }, top_k=5)
 
     yield (
         answer,
         tool_result.sections,
         tool_result.latency,
-        chart,
+        retrieval_chart,
         _cache_stats_md(hit=False),
         rewrite_md,
         memory.display(),
         tool_md,
         guard_md,
+        ragas_chart,
+        ragas_md,
     )
 
 
@@ -200,13 +218,11 @@ def _guard_badge(guard, sanitise_result) -> str:
         parts.append(f"🔐 **Security:** {len(sanitise_result.changes)} pattern(s) stripped")
     else:
         parts.append("🔐 **Security:** Input clean")
-
     if guard.blocked:
         icons = {"jailbreak": "🚨", "harmful": "🚨", "off_topic": "⚠️"}
         parts.append(f"{icons.get(guard.layer, '⚠️')} **Guardrails:** Blocked — {guard.layer}")
     else:
         parts.append("🛡️ **Guardrails:** Passed")
-
     return "  ·  ".join(parts)
 
 
@@ -393,6 +409,16 @@ textarea:focus, input[type="text"]:focus {
     color: #94a3b8 !important;
 }
 
+#ragas-info {
+    background: #0a0d16 !important;
+    border: 1px solid #1e2235 !important;
+    border-left: 3px solid #7c3aed !important;
+    border-radius: 12px !important;
+    padding: 0.75rem 1rem !important;
+    font-size: 0.85rem !important;
+    color: #94a3b8 !important;
+}
+
 .plot-container {
     background: #0f1117 !important;
     border: 1px solid #1e2235 !important;
@@ -419,7 +445,7 @@ with gr.Blocks(title="Hybrid RAG Knowledge Engine", css=css, theme=gr.themes.Bas
         gr.Markdown(
             "Semantic + BM25 · Cross-encoder reranking · LLM generation · "
             "Streaming · Cache · Query Rewriting · Memory · Tool Routing · "
-            "Guardrails · Prompt Injection Defense · PII Scrubbing",
+            "Guardrails · Prompt Injection Defense · PII Scrubbing · RAGAS Evaluation",
             elem_id="subheader-md"
         )
 
@@ -437,7 +463,6 @@ with gr.Blocks(title="Hybrid RAG Knowledge Engine", css=css, theme=gr.themes.Bas
             elem_classes=["panel"]
         )
 
-    # ── Info panels: security+guard · rewrite · memory · tool ─────────────────
     with gr.Row():
         guard_info   = gr.Markdown(
             value="🔐 **Security:** Input clean  ·  🛡️ **Guardrails:** Ready",
@@ -451,8 +476,21 @@ with gr.Blocks(title="Hybrid RAG Knowledge Engine", css=css, theme=gr.themes.Bas
         retrieved_sections = gr.JSON(label="Top Retrieved Sections", elem_classes=["panel"])
         latency            = gr.JSON(label="Retrieval Latency (ms)",  elem_classes=["panel"])
 
-    chart = gr.Plot(label="Evaluation Metrics", elem_classes=["panel"])
+    # ── Two charts side by side ───────────────────────────────────────────────
+    with gr.Row(equal_height=True):
+        retrieval_chart = gr.Plot(
+            label="Retrieval Metrics  (Precision · MRR · nDCG)",
+            elem_classes=["panel"]
+        )
+        ragas_chart = gr.Plot(
+            label="RAGAS  (Faithfulness · Answer Relevancy · Context Precision · Context Recall)",
+            elem_classes=["panel"]
+        )
 
+    ragas_md    = gr.Markdown(
+        value="📊 **RAGAS:** Will appear after first query",
+        elem_id="ragas-info"
+    )
     cache_stats = gr.Markdown(value=_cache_stats_md(), elem_id="cache-stats")
 
     with gr.Row():
@@ -462,8 +500,9 @@ with gr.Blocks(title="Hybrid RAG Knowledge Engine", css=css, theme=gr.themes.Bas
         submit            = gr.Button("Submit →",      elem_id="submit-btn")
 
     _outputs = [
-        answer, retrieved_sections, latency, chart,
+        answer, retrieved_sections, latency, retrieval_chart,
         cache_stats, rewrite_info, memory_info, tool_info, guard_info,
+        ragas_chart, ragas_md,
     ]
 
     submit.click(fn=rag_pipeline, inputs=[query, session_memory], outputs=_outputs)
@@ -480,9 +519,12 @@ with gr.Blocks(title="Hybrid RAG Knowledge Engine", css=css, theme=gr.themes.Bas
     )
 
     clear_btn.click(
-        fn=lambda: ("", [], {}, None, _cache_stats_md(), "",
-                    "💬 **Memory:** No history yet", "",
-                    "🔐 **Security:** Input clean  ·  🛡️ **Guardrails:** Ready"),
+        fn=lambda: (
+            "", [], {}, None,
+            _cache_stats_md(), "", "💬 **Memory:** No history yet", "",
+            "🔐 **Security:** Input clean  ·  🛡️ **Guardrails:** Ready",
+            None, "📊 **RAGAS:** Will appear after first query",
+        ),
         outputs=_outputs,
     )
 
