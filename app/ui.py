@@ -25,7 +25,9 @@ from app.tool_router     import ToolRouter
 from app.tools           import dispatch_tool
 from app.guardrails      import Guardrails
 from app.security        import input_sanitiser, pii_scrubber
-from app.ragas_eval      import RAGASEvaluator, build_ragas_chart  # ← NEW (Day 7)
+from app.ragas_eval      import RAGASEvaluator, build_ragas_chart
+from app.doc_quality     import DocQualityScorer                   # ← NEW (Day 8)
+from app.compressor      import ContextualCompressor               # ← NEW (Day 8)
 import re
 
 def clean_title(title):
@@ -51,17 +53,19 @@ generator         = GroqGenerator()
 rewriter          = QueryRewriter()
 tool_router       = ToolRouter()
 guardrails        = Guardrails()
-ragas_evaluator   = RAGASEvaluator()                               # ← NEW (Day 7)
+ragas_evaluator   = RAGASEvaluator()
+quality_scorer    = DocQualityScorer()                             # ← NEW (Day 8)
+compressor        = ContextualCompressor()                         # ← NEW (Day 8)
 
 # ---------------------------
 # Pipeline
 # ---------------------------
 def rag_pipeline(query, memory: ConversationMemory):
     """
-    Gradio generator — yields 11 values on every streaming token:
+    Gradio generator — yields 13 values on every streaming token:
       answer, sections, latency, retrieval_chart, cache_md,
       rewrite_md, memory_md, tool_md, guard_md,
-      ragas_chart, ragas_md
+      ragas_chart, ragas_md, quality_md, compress_md
     """
 
     # ── 0a. INPUT SANITISATION ────────────────────────────────────────────────
@@ -78,7 +82,7 @@ def rag_pipeline(query, memory: ConversationMemory):
             [], {}, None,
             _cache_stats_md(),
             "", memory.display(), "", guard_md,
-            None, "",
+            None, "", "", "",
         )
         return
 
@@ -97,6 +101,8 @@ def rag_pipeline(query, memory: ConversationMemory):
             guard_md,
             cached.get("ragas_chart"),
             cached.get("ragas_md", ""),
+            cached.get("quality_md", ""),
+            cached.get("compress_md", ""),
         )
         return
 
@@ -109,11 +115,13 @@ def rag_pipeline(query, memory: ConversationMemory):
     route   = tool_router.route(clean_query)
     tool_md = route.badge()
 
-    # ── 4. Retrieval ──────────────────────────────────────────────────────────
+    # ── 4. Retrieval + Quality + Compression ──────────────────────────────────
     contexts        = []
     sections        = []
     latency         = {}
     retrieval_chart = None
+    quality_md      = ""
+    compress_md     = ""
 
     if route.tool != "answer_direct":
         top_k = 10 if route.tool == "summarise" else 5
@@ -122,8 +130,21 @@ def rag_pipeline(query, memory: ConversationMemory):
         results          = reranker.rerank(retrieval_query, results)
         raw_contexts     = [r["text"]                       for r in results[:top_k]]
         sections         = [clean_title(r["section_title"]) for r in results[:top_k]]
-        contexts         = pii_scrubber.scrub_contexts(raw_contexts)
 
+        # PII scrub
+        pii_contexts = pii_scrubber.scrub_contexts(raw_contexts)
+
+        # Doc quality scoring (NEW Day 8) — zero LLM calls, instant
+        quality_report    = quality_scorer.score_all(pii_contexts)
+        quality_md        = quality_report.summary_md()
+        filtered_contexts = quality_scorer.filter_low_quality(pii_contexts, quality_report)
+
+        # Contextual compression (NEW Day 8) — LLM extracts relevant sentences
+        compress_result = compressor.compress(retrieval_query, filtered_contexts)
+        contexts        = compress_result.compressed_chunks
+        compress_md     = compress_result.badge()
+
+        # Retrieval evaluation
         evaluator = RetrievalEvaluator()
         matched   = next((e for e in eval_queries if e["query"].lower() == clean_query.lower()), None)
         relevant_sections = matched["relevant_sections"] if matched else (sections[:1] if sections else [])
@@ -137,7 +158,7 @@ def rag_pipeline(query, memory: ConversationMemory):
     memory.add_user(clean_query)
     history = memory.get_history()
 
-    # ── 6. Dispatch + stream ──────────────────────────────────────────────────
+    # ── 6. Dispatch + stream (with compressed contexts) ───────────────────────
     tool_result = dispatch_tool(
         tool_name=route.tool,
         query=clean_query,
@@ -164,12 +185,14 @@ def rag_pipeline(query, memory: ConversationMemory):
             guard_md,
             None,
             "⏳ **RAGAS:** Evaluating after generation...",
+            quality_md,
+            compress_md,
         )
 
     # ── 7. PII scrub answer ───────────────────────────────────────────────────
     answer = pii_scrubber.scrub_answer(answer)
 
-    # ── 8. RAGAS evaluation (NEW Day 7) ───────────────────────────────────────
+    # ── 8. RAGAS evaluation ───────────────────────────────────────────────────
     ragas_result = ragas_evaluator.evaluate(
         query=clean_query,
         answer=answer,
@@ -192,6 +215,8 @@ def rag_pipeline(query, memory: ConversationMemory):
             "tool_md":     tool_md,
             "ragas_chart": ragas_chart,
             "ragas_md":    ragas_md,
+            "quality_md":  quality_md,
+            "compress_md": compress_md,
         }, top_k=5)
 
     yield (
@@ -206,6 +231,8 @@ def rag_pipeline(query, memory: ConversationMemory):
         guard_md,
         ragas_chart,
         ragas_md,
+        quality_md,
+        compress_md,
     )
 
 
@@ -419,6 +446,26 @@ textarea:focus, input[type="text"]:focus {
     color: #94a3b8 !important;
 }
 
+#quality-info {
+    background: #0a0d16 !important;
+    border: 1px solid #1e2235 !important;
+    border-left: 3px solid #ca8a04 !important;
+    border-radius: 12px !important;
+    padding: 0.75rem 1rem !important;
+    font-size: 0.85rem !important;
+    color: #94a3b8 !important;
+}
+
+#compress-info {
+    background: #0a0d16 !important;
+    border: 1px solid #1e2235 !important;
+    border-left: 3px solid #0891b2 !important;
+    border-radius: 12px !important;
+    padding: 0.75rem 1rem !important;
+    font-size: 0.85rem !important;
+    color: #94a3b8 !important;
+}
+
 .plot-container {
     background: #0f1117 !important;
     border: 1px solid #1e2235 !important;
@@ -445,7 +492,7 @@ with gr.Blocks(title="Hybrid RAG Knowledge Engine", css=css, theme=gr.themes.Bas
         gr.Markdown(
             "Semantic + BM25 · Cross-encoder reranking · LLM generation · "
             "Streaming · Cache · Query Rewriting · Memory · Tool Routing · "
-            "Guardrails · Prompt Injection Defense · PII Scrubbing · RAGAS Evaluation",
+            "Guardrails · Security · RAGAS · Doc Quality · Contextual Compression",
             elem_id="subheader-md"
         )
 
@@ -463,6 +510,7 @@ with gr.Blocks(title="Hybrid RAG Knowledge Engine", css=css, theme=gr.themes.Bas
             elem_classes=["panel"]
         )
 
+    # ── Row 1: security · rewrite · memory · tool ─────────────────────────────
     with gr.Row():
         guard_info   = gr.Markdown(
             value="🔐 **Security:** Input clean  ·  🛡️ **Guardrails:** Ready",
@@ -472,18 +520,28 @@ with gr.Blocks(title="Hybrid RAG Knowledge Engine", css=css, theme=gr.themes.Bas
         memory_info  = gr.Markdown(value="💬 **Memory:** No history yet", elem_id="memory-info")
         tool_info    = gr.Markdown(value="", elem_id="tool-info")
 
+    # ── Row 2: quality · compression ──────────────────────────────────────────
+    with gr.Row():
+        quality_md  = gr.Markdown(
+            value="📋 **Doc Quality:** Will appear after first query",
+            elem_id="quality-info"
+        )
+        compress_md = gr.Markdown(
+            value="🗜️ **Compression:** Will appear after first query",
+            elem_id="compress-info"
+        )
+
     with gr.Row(equal_height=True):
         retrieved_sections = gr.JSON(label="Top Retrieved Sections", elem_classes=["panel"])
         latency            = gr.JSON(label="Retrieval Latency (ms)",  elem_classes=["panel"])
 
-    # ── Two charts side by side ───────────────────────────────────────────────
     with gr.Row(equal_height=True):
         retrieval_chart = gr.Plot(
             label="Retrieval Metrics  (Precision · MRR · nDCG)",
             elem_classes=["panel"]
         )
         ragas_chart = gr.Plot(
-            label="RAGAS  (Faithfulness · Answer Relevancy · Context Precision · Context Recall)",
+            label="RAGAS  (Faithfulness · Relevancy · Precision · Recall)",
             elem_classes=["panel"]
         )
 
@@ -503,6 +561,7 @@ with gr.Blocks(title="Hybrid RAG Knowledge Engine", css=css, theme=gr.themes.Bas
         answer, retrieved_sections, latency, retrieval_chart,
         cache_stats, rewrite_info, memory_info, tool_info, guard_info,
         ragas_chart, ragas_md,
+        quality_md, compress_md,
     ]
 
     submit.click(fn=rag_pipeline, inputs=[query, session_memory], outputs=_outputs)
@@ -524,6 +583,8 @@ with gr.Blocks(title="Hybrid RAG Knowledge Engine", css=css, theme=gr.themes.Bas
             _cache_stats_md(), "", "💬 **Memory:** No history yet", "",
             "🔐 **Security:** Input clean  ·  🛡️ **Guardrails:** Ready",
             None, "📊 **RAGAS:** Will appear after first query",
+            "📋 **Doc Quality:** Will appear after first query",
+            "🗜️ **Compression:** Will appear after first query",
         ),
         outputs=_outputs,
     )
