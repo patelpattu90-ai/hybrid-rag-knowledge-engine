@@ -8,4 +8,9 @@ rank-bm25
 groq
 python-dotenv
 gradio
-requests
+sentence-transformers
+faiss-cpu
+torch
+transformers
+matplotlib
+numpy

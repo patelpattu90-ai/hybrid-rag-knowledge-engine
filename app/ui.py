@@ -591,5 +591,8 @@ with gr.Blocks(title="Hybrid RAG Knowledge Engine", css=css, theme=gr.themes.Bas
 
     clear_cache_btn.click(fn=_clear_cache, outputs=[cache_stats])
 
+
 if __name__ == "__main__":
     demo.launch()
+else:
+    demo.launch(server_name="0.0.0.0", server_port=7860)
