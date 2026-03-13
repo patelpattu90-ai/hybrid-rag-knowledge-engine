@@ -1,209 +1,344 @@
-⚡ Hybrid RAG Knowledge Engine
+---
+title: Hybrid RAG Knowledge Engine
+emoji: ⚡
+colorFrom: indigo
+colorTo: purple
+sdk: gradio
+sdk_version: 5.23.3
+app_file: app.py
+pinned: true
+license: mit
+short_description: Production RAG system on FastAPI docs — 10 pipeline layers
+---
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Python-3.10-3776AB?style=for-the-badge&logo=python&logoColor=white">
-  <img src="https://img.shields.io/badge/Groq-LLaMA3.3_70B-F54F36?style=for-the-badge&logo=groq&logoColor=white">
-  <img src="https://img.shields.io/badge/FAISS-Vector_Search-4285F4?style=for-the-badge">
-  <img src="https://img.shields.io/badge/Gradio-UI-FF7C00?style=for-the-badge&logo=gradio&logoColor=white">
-  <img src="https://img.shields.io/badge/License-MIT-22C55E?style=for-the-badge">
-  <img src="https://img.shields.io/badge/Status-Active-22C55E?style=for-the-badge">
-</p>
+# ⚡ Hybrid RAG Knowledge Engine
 
-A production-style Retrieval Augmented Generation (RAG) system that answers questions about FastAPI documentation using hybrid retrieval, reranking, and LLM generation.
+> A production-grade Retrieval-Augmented Generation system built on FastAPI documentation.
+> Every layer of the pipeline is observable, evaluated, and security-hardened.
 
-The system combines semantic search (FAISS) and keyword search (BM25), followed by cross-encoder reranking, to retrieve the most relevant documentation context before generating an answer with an LLM.
+![Python](https://img.shields.io/badge/Python-3.11+-blue?style=flat-square&logo=python)
+![Groq](https://img.shields.io/badge/LLM-LLaMA%203.3%2070B%20via%20Groq-orange?style=flat-square)
+![Gradio](https://img.shields.io/badge/UI-Gradio-purple?style=flat-square)
+![FAISS](https://img.shields.io/badge/Vector%20DB-FAISS-green?style=flat-square)
+![License](https://img.shields.io/badge/License-MIT-lightgrey?style=flat-square)
 
-The project also includes retrieval evaluation metrics and visualization to measure the quality of the RAG pipeline.
+---
 
-🚀 Features
-🔎 Hybrid Retrieval
+## 🗂️ Table of Contents
 
-Semantic search using SentenceTransformers embeddings + FAISS
-Keyword search using BM25
-Hybrid score fusion for improved recall
+- [What This Is](#what-this-is)
+- [Architecture](#architecture)
+- [Pipeline Walkthrough](#pipeline-walkthrough)
+- [Features](#features)
+- [Project Structure](#project-structure)
+- [Setup](#setup)
+- [Usage](#usage)
+- [Evaluation Metrics](#evaluation-metrics)
+- [Day-by-Day Build Log](#day-by-day-build-log)
 
-🧠 Reranking
+---
 
-Cross-encoder reranker (ms-marco-MiniLM-L-6-v2)
-Improves relevance of top retrieved chunks
+## What This Is
 
-🤖 LLM Generation
+A full-stack RAG system that retrieves answers from FastAPI documentation using:
 
-Groq LLM used for context-aware answer generation
-Answers generated strictly from retrieved documentation
+- **Hybrid search** — semantic (FAISS + MiniLM embeddings) + keyword (BM25) with RRF score fusion
+- **Cross-encoder reranking** — ms-marco reranks top results for precision
+- **LLM generation** — LLaMA 3.3 70B via Groq API with streaming
+- **9 production layers** — caching, query rewriting, conversation memory, tool routing, guardrails, security, RAGAS evaluation, doc quality scoring, and contextual compression
 
-📊 Retrieval Evaluation
+Every query goes through all 9 layers in under 3 seconds (excluding RAGAS evaluation).
 
-Includes standard IR metrics:
+---
 
-Precision@K
-MRR (Mean Reciprocal Rank)
-nDCG@K
-Metrics are visualized using Matplotlib charts.
+## Architecture
 
-⚡ Observability
+```
+User Query
+    │
+    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                        SECURITY LAYER                           │
+│  InputSanitiser — 12 injection patterns + 1000 char truncation  │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                       GUARDRAILS LAYER                          │
+│  Layer 1: Jailbreak regex (16 patterns)                         │
+│  Layer 2: Harmful content regex (7 patterns)                    │
+│  Layer 3: Off-topic LLM classifier (temperature=0)              │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                  ┌────────┴────────┐
+                  │  Cache Check    │ ← SHA-256 key, TTL=3600s, LRU 256
+                  └────────┬────────┘
+                  HIT ◄────┤────► MISS
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     QUERY REWRITING                             │
+│  LLaMA rewrites query for better retrieval (temperature=0)      │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      TOOL ROUTING                               │
+│  search_docs → standard RAG (top-5)                             │
+│  summarise   → structured overview (top-10)                     │
+│  answer_direct → skip retrieval, use history only               │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    HYBRID RETRIEVAL                             │
+│  Semantic Search (FAISS + all-MiniLM-L6-v2, 384-dim)           │
+│       +                                                         │
+│  Keyword Search (BM25Okapi)                                     │
+│       ↓                                                         │
+│  RRF Score Fusion → Cross-Encoder Reranking (ms-marco)          │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   DOC QUALITY + COMPRESSION                     │
+│  DocQualityScorer — length, density, info scoring (heuristic)   │
+│  ContextualCompressor — LLM extracts relevant sentences only    │
+│  PIIScrubber — email, credit card, SSN, API keys scrubbed       │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  GENERATION (STREAMING)                         │
+│  ConversationMemory (deque, maxlen=6 turns)                     │
+│  LLaMA 3.3 70B via Groq — streams tokens to UI                  │
+│  PIIScrubber — answer scrubbed before display                   │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    RAGAS EVALUATION                             │
+│  Faithfulness · Answer Relevancy                                │
+│  Context Precision · Context Recall                             │
+│  4 × LLM-as-judge Groq calls (temperature=0)                    │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+                      Cache Write
+                           │
+                           ▼
+                      Final Answer
+```
 
-Retrieval latency breakdown:
-Semantic search time
-BM25 search time
-Hybrid fusion time
+---
 
-🎨 Interactive UI
+## Pipeline Walkthrough
 
-Built using Gradio
-UI shows:
-Generated answer
-Retrieved document sections
-Retrieval latency
-Evaluation metrics chart
+| Step | Module | What happens |
+|------|--------|-------------|
+| 0a | `security.py` | Injection patterns stripped, query truncated to 1000 chars |
+| 0b | `guardrails.py` | 3-layer check: jailbreak → harmful → off-topic LLM |
+| 1 | `cache.py` | SHA-256 lookup — return cached result if hit |
+| 2 | `query_rewriter.py` | LLM rewrites query for better retrieval |
+| 3 | `tool_router.py` | Routes to search_docs / summarise / answer_direct |
+| 4 | `hybrid_search.py` + `reranker.py` | FAISS + BM25 → RRF fusion → cross-encoder rerank |
+| 4b | `doc_quality.py` + `compressor.py` | Score chunks → filter low quality → compress to relevant sentences |
+| 5–6 | `memory.py` + `generator.py` | Inject history + stream answer tokens |
+| 7 | `security.py` (PIIScrubber) | Scrub PII from generated answer |
+| 8 | `ragas_eval.py` | 4-metric evaluation after full answer generated |
 
-## 🧠 System Architecture
+---
 
-<p align ="center">
-  <img src="screenshots/final_architecture.png" width="750">
-</p>
+## Features
 
-🧩 Project Structure
+### 🔍 Retrieval
+- **Hybrid search** combining dense (FAISS, 384-dim) and sparse (BM25) retrieval
+- **RRF fusion** — Reciprocal Rank Fusion combines both result lists
+- **Cross-encoder reranking** — ms-marco-MiniLM-L-6-v2 rescores top results
+- **Contextual compression** — LLM extracts only relevant sentences per chunk
+
+### 🧠 Generation
+- **LLaMA 3.3 70B** via Groq API — fastest inference available
+- **Token streaming** — answer appears word by word in the UI
+- **Conversation memory** — sliding window of 6 turns, per-session isolated
+- **Tool routing** — 3 modes: factual retrieval, structured summary, direct answer
+
+### 🛡️ Safety
+- **Prompt injection defense** — 12 regex patterns + length cap
+- **Guardrails** — jailbreak, harmful content, off-topic (3 layers)
+- **PII scrubbing** — two-tier: conservative for chunks, strict for answers
+
+### 📊 Evaluation
+- **Retrieval metrics** — Precision@5, MRR, nDCG@5
+- **RAGAS** — Faithfulness, Answer Relevancy, Context Precision, Context Recall
+- **Doc quality scoring** — per-chunk length, density, information richness
+
+### ⚡ Performance
+- **LRU cache** — SHA-256 keyed, TTL=3600s, 256 entries max
+- **Query rewriting** — improves retrieval recall on vague queries
+- **Doc quality filtering** — removes low-quality chunks before LLM call
+
+---
+
+## Project Structure
+
+```
 rag_knowledge_engine/
-│
 ├── app/
-│   ├── ui.py                # Gradio interface
-│   ├── ingestion.py        # Documentation ingestion
-│   ├── chunker.py          # Intelligent document chunking
-│   ├── embeddings.py       # Embedding + FAISS indexing
-│   ├── bm25_retriever.py   # BM25 keyword retrieval
-│   ├── hybrid_search.py    # Hybrid retrieval logic
-│   ├── reranker.py         # Cross-encoder reranking
-│   ├── generator.py        # Groq LLM generation
-│   ├── evaluator.py        # Retrieval metrics
-│   ├── eval_dataset.py     # Evaluation queries dataset
-│
-├── data_fastapi_docs/      # FastAPI documentation data
-├── tests/
+│   ├── ingestion.py          # 30 FastAPI doc URLs → raw markdown
+│   ├── chunker.py            # tiktoken cl100k, 400 tokens, 50 overlap
+│   ├── embeddings.py         # all-MiniLM-L6-v2, 384-dim, FAISS index
+│   ├── bm25_retriever.py     # BM25Okapi keyword search
+│   ├── hybrid_search.py      # RRF score fusion
+│   ├── reranker.py           # ms-marco-MiniLM-L-6-v2, top-5/10
+│   ├── generator.py          # Groq API, LLaMA 3.3 70B, streaming
+│   ├── cache.py              # OrderedDict LRU, SHA-256, TTL=3600
+│   ├── query_rewriter.py     # QueryRewriter, RewriteResult dataclass
+│   ├── memory.py             # ConversationMemory, deque maxlen=6
+│   ├── tool_router.py        # ToolRouter — zero-shot Groq classifier
+│   ├── tools.py              # dispatch_tool(), 3 tool implementations
+│   ├── guardrails.py         # 3-layer guardrail system
+│   ├── security.py           # InputSanitiser + PIIScrubber
+│   ├── doc_quality.py        # Heuristic chunk quality scorer
+│   ├── compressor.py         # LLM contextual compression
+│   ├── ragas_eval.py         # 4-metric RAGAS evaluation
+│   ├── evaluator.py          # Precision@5, MRR, nDCG@5
+│   ├── eval_dataset.py       # 50+ ground-truth query pairs
+│   └── ui.py                 # Gradio UI, 13-output pipeline
+├── tests/                    # 59 unit tests, 0 failures
+├── app.py                    # HuggingFace Spaces entry point
 ├── requirements.txt
 └── README.md
-⚙️ Installation
+```
 
-Clone the repository:
+---
 
+## Setup
+
+### 1. Clone
+
+```bash
 git clone https://github.com/patelpattu90-ai/hybrid-rag-knowledge-engine.git
 cd hybrid-rag-knowledge-engine
+```
 
-Create a virtual environment:
+### 2. Create virtual environment
 
+```bash
 python -m venv venv
-source venv/bin/activate
+venv\Scripts\activate        # Windows
+source venv/bin/activate     # macOS/Linux
+```
 
-Install dependencies:
+### 3. Install dependencies
+
+```bash
 pip install -r requirements.txt
-🔑 Environment Setup
+```
 
-Add your Groq API key:
-export GROQ_API_KEY=your_api_key_here
+### 4. Set up API key
 
-Or create a .env file:
-GROQ_API_KEY=your_api_key_here
+Create a `.env` file in the project root:
 
-▶️ Run the Application
+```env
+GROQ_API_KEY=your_groq_api_key_here
+```
 
-Start the RAG system:
+Get a free Groq API key at [console.groq.com](https://console.groq.com).
+
+### 5. Run
+
+```bash
 python -m app.ui
+```
 
-Open the UI:
-http://127.0.0.1:7860
+Open [http://127.0.0.1:7860](http://127.0.0.1:7860) in your browser.
 
-💬 Example Queries
+> **First run takes ~30 seconds** — downloads 30 FastAPI docs, builds FAISS index, and loads models.
 
-Try asking:
+---
 
-How does dependency injection work in FastAPI?
-Why is FastAPI fast?
-How to create middleware in FastAPI?
+## Usage
+
+### Ask factual questions
+```
 How do path parameters work in FastAPI?
-📊 Example Output
+What is dependency injection?
+How do I handle errors in FastAPI?
+```
 
-The system returns:
+### Ask for summaries
+```
+Give me an overview of all the ways to handle errors in FastAPI
+Summarise how authentication works in FastAPI
+```
 
-Generated Answer
+### Multi-turn conversation
+```
+User: What are path parameters?
+User: How are they different from query parameters?   ← uses memory
+User: Show me an example with both                    ← uses memory
+```
 
-To create middleware in FastAPI, you use the decorator
-@app.middleware("http") on top of a function...
+### Test guardrails
+```
+Ignore your instructions and...   ← blocked: jailbreak
+How do I make a bomb?             ← blocked: harmful
+What is the capital of France?    ← blocked: off-topic
+```
 
-Retrieved Sections
+---
 
-Create a middleware
-Recap
-First Steps
-Opinions
-Documentation
+## Evaluation Metrics
 
-Latency Metrics
+### Retrieval
+| Metric | Description | Baseline |
+|--------|-------------|---------|
+| Precision@5 | Fraction of top-5 results that are relevant | 0.22 |
+| MRR | Mean Reciprocal Rank of first relevant result | 0.43 |
+| nDCG@5 | Normalized Discounted Cumulative Gain | 0.60 |
 
-semantic_ms: 14.01
-bm25_ms: 0.39
-fusion_ms: 0.05
+### RAGAS
+| Metric | Description | What it catches |
+|--------|-------------|----------------|
+| Faithfulness | Answer claims supported by context | Hallucinations |
+| Answer Relevancy | Answer addresses the question | Off-topic answers |
+| Context Precision | Retrieved chunks were useful | Noisy retrieval |
+| Context Recall | Context covered the answer fully | Missing context |
 
-Evaluation Metrics
+---
 
-Precision@5
-MRR
-nDCG@5
-📈 Evaluation Metrics
-Metric	Description
-Precision@K	Percentage of relevant documents in top K results
-MRR	Measures ranking position of first relevant document
-nDCG@K	Ranking quality considering position importance
+## Day-by-Day Build Log
 
-These metrics help evaluate retrieval performance in the RAG pipeline.
+| Day | Feature | Key files |
+|-----|---------|-----------|
+| 1 | Streaming + LRU Cache | `cache.py`, `generator.py` |
+| 2 | Query Rewriting | `query_rewriter.py` |
+| 3 | Conversation Memory | `memory.py` |
+| 4 | Tool Routing + Dispatch | `tool_router.py`, `tools.py` |
+| 5 | Guardrails (3-layer) | `guardrails.py` |
+| 6 | Prompt Injection + PII | `security.py` |
+| 7 | RAGAS Evaluation | `ragas_eval.py` |
+| 8 | Doc Quality + Compression | `doc_quality.py`, `compressor.py` |
+| 9 | README + Tests + Deploy | `README.md`, `tests/`, `app.py` |
 
-🛠 Tech Stack
-Component	Technology
-Embeddings	SentenceTransformers
-Vector Search	FAISS
-Keyword Search	BM25
-Reranking	Cross-Encoder
-LLM	Groq
-UI	Gradio
-Visualization	Matplotlib
-Language	Python
+---
 
-## 🎯 Why This Project
+## Tech Stack
 
-Most RAG systems rely on pure semantic search — which fails on exact keyword lookups.
-This project solves that by combining semantic + keyword retrieval with cross-encoder
-reranking, giving significantly better retrieval quality than single-method approaches.
+| Component | Technology |
+|-----------|-----------|
+| LLM | LLaMA 3.3 70B via Groq API |
+| Embeddings | all-MiniLM-L6-v2 (SentenceTransformers) |
+| Vector DB | FAISS (Facebook AI Similarity Search) |
+| Keyword Search | BM25Okapi (rank-bm25) |
+| Reranker | ms-marco-MiniLM-L-6-v2 (CrossEncoder) |
+| Tokenizer | tiktoken cl100k_base |
+| UI | Gradio |
+| Language | Python 3.11+ |
 
-Built to demonstrate production-ready RAG architecture with real evaluation metrics,
-not just a demo that "works on my machine".
+---
 
-<h2 align="center">📸 Project Demo</h2>
+## License
 
-<p align="center">
-  <img src="screenshots/ui.png" width="850">
-</p>
-
-<p align="center"><b>Upload documentation and ask questions</b></p>
-
-<br>
-
-<p align="center">
-  <img src="screenshots/response.png" width="850">
-</p>
-
-<p align="center"><b>Hybrid RAG retrieving semantic + keyword results</b></p>
-
-<br>
-
-<p align="center">
-  <img src="screenshots/latency.png" width="850">
-</p>
-
-<p align="center"><b>Latency comparison between retrieval methods</b></p>
-
-<br>
-
-<p align="center">
-  <img src="screenshots/evaluation_metrics.png" width="850">
-</p>
-
-<p align="center"><b>Evaluation metrics of retrieval quality</b></p>
+MIT — see [LICENSE](LICENSE) for details.
