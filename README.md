@@ -21,6 +21,17 @@ short_description: Production RAG system on FastAPI docs — 10 pipeline layers
 ![Gradio](https://img.shields.io/badge/UI-Gradio-purple?style=flat-square)
 ![FAISS](https://img.shields.io/badge/Vector%20DB-FAISS-green?style=flat-square)
 ![License](https://img.shields.io/badge/License-MIT-lightgrey?style=flat-square)
+![Python](https://img.shields.io/badge/Python-3.11+-blue?style=flat-square&logo=python)
+![LLM](https://img.shields.io/badge/LLM-LLaMA%203.3%2070B%20via%20Groq-orange?style=flat-square)
+![UI](https://img.shields.io/badge/UI-Gradio-purple?style=flat-square)
+![Vector DB](https://img.shields.io/badge/Vector%20DB-FAISS-brightgreen?style=flat-square)
+![License](https://img.shields.io/badge/License-MIT-lightgrey?style=flat-square)
+![Tests](https://img.shields.io/badge/Tests-59%20passed-brightgreen?style=flat-square)
+![Layers](https://img.shields.io/badge/Pipeline%20Layers-10-blueviolet?style=flat-square)
+![HuggingFace](https://img.shields.io/badge/🤗%20Live%20Demo-HuggingFace%20Spaces-yellow?style=flat-square)
+![Status](https://img.shields.io/badge/Status-Live-brightgreen?style=flat-square)
+
+[Live Demo → prathai-hybrid-rag-knowledge-engine.hf.space](https://prathai-hybrid-rag-knowledge-engine.hf.space)
 
 ---
 
