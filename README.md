@@ -147,6 +147,25 @@ rag_knowledge_engine/
 
 ---
 
+Images :
+
+### Hybrid UI
+![Hybrid UI](screenshots/Hybrid_ui.png)
+
+### Response Example
+![Response](screenshots/response.png)
+
+### Evaluation Metrics
+![Evaluation](screenshots/evaluation_metrics.png)
+
+### Latency Graph
+![Latency](screenshots/latency.png)
+
+### Test Cases Check
+![Test case](screenshots/59_passed.png)
+
+
+
 ## Setup
 
 ### 1. Clone
